@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>11×11 Word‑Steal</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        text-align: center;
+        margin: 0 auto;
+        max-width: 720px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(11, 42px);
+        grid-gap: 4px;
+        margin: auto;
+        max-width: 506px;
+      }
+      .square {
+        width: 42px;
+        height: 42px;
+        border: 1px solid #777;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: bold;
+        font-size: 1.1rem;
+        position: relative;
+      }
+      .square.me {
+        background: #ffd1dc;
+      } /* pink  */
+      .square.them {
+        background: #cce5ff;
+      } /* blue  */
+      .rack {
+        display: flex;
+        justify-content: center;
+        gap: 4px;
+        margin: 1rem;
+      }
+      .tile {
+        position: relative;
+        user-select: none;
+        cursor: grab;
+        width: 40px;
+        height: 40px;
+        border: 1px solid #222;
+        background: #f5f5dc;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .tile::after,
+      .square::after {
+        content: attr(data-pts);
+        position: absolute;
+        right: 3px;
+        bottom: 1px;
+        font-size: 0.55rem;
+        font-weight: normal;
+      }
+      .dragging {
+        opacity: 0.4;
+      }
+      #scores {
+        margin: 0.5rem;
+        font-weight: bold;
+      }
+      #remaining-tiles-available {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+      .tile.remaining-tile {
+        background: #f5f5dc;
+        width: 28px;
+        height: 28px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: default;
+      }
+      .tile.remaining-tile.available {
+        opacity: 1;
+      }
+      .tile.remaining-tile.used {
+        opacity: 0.5;
+      }
+      button {
+        padding: 0.4rem 0.8rem;
+        font-size: 1rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Word‑Steal</h1>
+
+    <section id="scores">
+      <span id="me">You 0</span> |
+      <span id="them">Opponent 0</span>
+    </section>
+
+    <section id="board" class="grid"></section>
+
+    <section id="rack" class="rack"></section>
+
+    <section id="remaining-tiles-available"></section>
+
+    <button id="submit" disabled>Submit</button>
+
+    <script>
+      /*
+            Lightweight itty‑sockets client.  The connect() function below is copied
+            directly from the itty‑sockets documentation.  It connects to a channel
+            on the public ittysockets service and returns an object with on(),
+            send() and other helpers.  See https://ittysockets.com for details.
+            */
+      let connect = (e, s = {}) => {
+        let t,
+          a = 0,
+          n = [],
+          p = [],
+          o = {},
+          l = () => (
+            t ||
+              ((t = new WebSocket(
+                (/^wss?:/.test(e) ? e : "wss://ittysockets.io/c/" + e) +
+                  "?" +
+                  new URLSearchParams(s)
+              )),
+              (t.onmessage = (
+                e,
+                s = JSON.parse(e.data),
+                t = s?.message,
+                a = {
+                  ...(null == t?.[0] && t),
+                  ...s,
+                  ...(s.date && { date: new Date(s.date) }),
+                }
+              ) => {
+                o[s?.type ?? t?.type]?.map((e) => e(a)),
+                  s?.type || o.message?.map((e) => e(a)),
+                  p.map(([e, s]) => e(a) && s(a));
+              }),
+              (t.onopen = () => (
+                n.splice(0).map((e) => t?.send(e)),
+                o.open?.map((e) => e()),
+                a && t?.close()
+              )),
+              (t.onclose = () => (
+                (a = 0), (t = null), o.close?.map((e) => e())
+              ))),
+            c
+          ),
+          c = new Proxy(l, {
+            get: (e, s) =>
+              ({
+                open: l,
+                close: () => (1 == t?.readyState ? t.close() : (a = 1), c),
+                push: (e, s) => ((a = 1), c.send(e, s)),
+                send: (e, s) => (
+                  (e = JSON.stringify(e)),
+                  (e = s ? "@@" + s + "@@" + e : e),
+                  1 == t?.readyState ? (t.send(e), c) : (n.push(e), l())
+                ),
+                on: (e, s) => (
+                  s && (e?.[0] ? (o[e] ??= []).push(s) : p.push([e, s])), l()
+                ),
+                remove: (e, s, t = o[e], a = t?.indexOf(s) ?? -1) => (
+                  ~a && t?.splice(a, 1), l()
+                ),
+              }[s]),
+          });
+        return c;
+      }; /* ---------- constants ---------- */
+      /* ---------- helpers added ---------- */
+      const slug = (id = "") => id.replace(/[^a-z0-9]/gi, "-").toLowerCase();
+      const SIZE = 11;
+      const POINT = {
+        "*": 0,
+        A: 1,
+        B: 3,
+        C: 3,
+        D: 2,
+        E: 1,
+        F: 3,
+        G: 2,
+        H: 3,
+        I: 1,
+        J: 5,
+        K: 4,
+        L: 2,
+        M: 3,
+        N: 2,
+        O: 1,
+        P: 3,
+        Q: 5,
+        R: 1,
+        S: 1,
+        T: 1,
+        U: 2,
+        V: 4,
+        W: 3,
+        X: 4,
+        Y: 2,
+        Z: 5,
+      };
+      const BAG = (
+        "*".repeat(2) +
+        "E".repeat(12) +
+        "A".repeat(9) +
+        "I".repeat(9) +
+        "O".repeat(8) +
+        "N".repeat(6) +
+        "R".repeat(6) +
+        "T".repeat(6) +
+        "L".repeat(4) +
+        "S".repeat(4) +
+        "U".repeat(4) +
+        "D".repeat(4) +
+        "G".repeat(3) +
+        "B".repeat(2) +
+        "C".repeat(2) +
+        "M".repeat(2) +
+        "P".repeat(2) +
+        "F".repeat(2) +
+        "H".repeat(2) +
+        "VWX".repeat(2) +
+        "JQZ"
+      ).split(""); /* ---------- DOM refs ---------- */
+
+      const boardEl = document.getElementById("board");
+      const rackEl = document.getElementById("rack");
+      const submit = document.getElementById("submit");
+      const meScore = document.getElementById("me");
+      const thScore =
+        document.getElementById("them"); /* ---------- game state ---------- */
+
+      const room =
+        new URLSearchParams(location.search).get("room") || "ooicu812";
+      const ws = connect(room, { announce: true });
+      const uid = new URLSearchParams(location.search).get("uid");
+      const board = Array.from({ length: SIZE }, () => Array(SIZE).fill(null));
+      let bag = [...BAG];
+      let myRack = [];
+      let myTurnPlacements = []; // {x,y,letter}
+      // CHANGE 1: Use a dictionary for scores, keyed by player uid.
+      const scores = {}; /* ---------- helpers ---------- */
+
+      const rnd = () => Math.floor(Math.random() * bag.length);
+      function drawTiles(qty) {
+        for (let i = 0; i < qty && bag.length; i++) {
+          const l = bag.splice(rnd(), 1)[0];
+          myRack.push(l);
+        }
+        paintRack();
+      }
+      function paintRack() {
+        rackEl.innerHTML = "";
+        myRack.forEach((l, i) => {
+          const d = document.createElement("div");
+          d.textContent = l;
+          d.className = "tile";
+          d.draggable = true;
+          d.dataset.i = i;
+          d.dataset.pts = POINT[l];
+          d.addEventListener("dragstart", (e) => {
+            e.dataTransfer.setData(
+              "text/plain",
+              JSON.stringify({ src: "rack", idx: i, letter: l })
+            );
+            d.classList.add("dragging");
+          });
+          d.addEventListener("dragend", () => d.classList.remove("dragging"));
+          rackEl.appendChild(d);
+        });
+      }
+      function paintBoard() {
+        boardEl.innerHTML = "";
+        for (let y = 0; y < SIZE; y++) {
+          for (let x = 0; x < SIZE; x++) {
+            const sq = document.createElement("div");
+            sq.className = "square";
+            sq.dataset.x = x;
+            sq.dataset.y = y;
+
+            const tile = board[y][x];
+            if (tile) {
+              sq.textContent = tile.letter;
+              /* NEW → put the score in the bottom‑right corner */
+              sq.dataset.pts = tile.points ?? POINT[tile.letter];
+              sq.classList.add(slug(tile.owner)); // e.g. “acme‑corp”
+              sq.classList.add(tile.owner === uid ? "me" : "them");
+            }
+
+            sq.addEventListener("dragover", (e) => e.preventDefault());
+            sq.addEventListener("drop", handleDrop);
+            boardEl.appendChild(sq);
+          }
+        }
+      }
+      const ORIGINAL_COUNTS = BAG.reduce((m, l) => {
+        m[l] = (m[l] || 0) + 1;
+        return m;
+      }, {});
+
+      function updateRemainingTiles() {
+        const el = document.getElementById("remaining-tiles-available");
+        if (!el) return;
+        el.innerHTML = ""; // clear previous tiles
+
+        // How many of each letter are currently on the board?
+        const played = {};
+        board.flat().forEach((cell) => {
+          if (cell) played[cell.letter] = (played[cell.letter] || 0) + 1;
+        });
+
+        // Render one “mini-tile” for every tile that ever existed.
+        Object.keys(ORIGINAL_COUNTS)
+          .sort()
+          .forEach((letter) => {
+            const total = ORIGINAL_COUNTS[letter];
+            const dimmed = played[letter] || 0; // tiles already played
+
+            for (let i = 0; i < total; i++) {
+              const t = document.createElement("div");
+              t.className = "tile";
+              t.textContent = letter;
+              // t.dataset.pts = POINT[letter];
+              t.classList.add("remaining-tile");
+              if (i < total - dimmed) {
+                t.classList.add("available");
+              } else {
+                t.classList.add("used");
+              }
+              t.title = `${letter} (${total - dimmed} remaining)`;
+              el.appendChild(t);
+            }
+          });
+      }
+      /* cache dictionary look‑ups so we don’t hammer the API */
+      const dictCache = new Map();
+      async function validateWord(w) {
+        if (dictCache.has(w)) return dictCache.get(w);
+        const ok = (
+          await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${w}`)
+        ).ok;
+        dictCache.set(w, ok); // basic rate–limiting
+        return ok;
+      }
+      function findWords() {
+        const words = [];
+        const dirs = [
+          [1, 0],
+          [0, 1],
+        ];
+        for (const { x, y } of myTurnPlacements) {
+          for (const [dx, dy] of dirs) {
+            let sx = x,
+              sy = y;
+            while (board[sy - dy]?.[sx - dx]) {
+              sx -= dx;
+              sy -= dy;
+            }
+            let word = "",
+              cells = [];
+            let cx = sx,
+              cy = sy;
+            while (board[cy]?.[cx]) {
+              word += board[cy][cx].letter;
+              cells.push({ x: cx, y: cy });
+              cx += dx;
+              cy += dy;
+            }
+            if (word.length > 1) words.push({ word, cells });
+          }
+        }
+        return [...new Map(words.map((o) => [o.word, o])).values()];
+      }
+      // CHANGE 2: Simplify scoring logic.
+      // This function now calculates the total score for all new words formed
+      // and adds it to the current player's score. The complex "steal"
+      // logic, which was not functioning correctly, has been removed.
+      function scoreTurn(words) {
+        let turnScore = 0;
+        const scored = new Set();
+
+        for (const { cells } of words) {
+          for (const { x, y } of cells) {
+            const key = `${x},${y}`;
+            if (scored.has(key)) continue;
+            scored.add(key);
+
+            const tile = board[y][x];
+            const pts = tile.points ?? POINT[tile.letter];
+            const former = tile.owner;
+
+            /* Steal if the tile belonged to someone else */
+            if (former && former !== uid) {
+              scores[former] = Math.max(0, (scores[former] || 0) - pts);
+              tile.owner = uid; // flip ownership & colour
+            }
+
+            turnScore += pts;
+          }
+        }
+        scores[uid] = (scores[uid] || 0) + turnScore;
+      }
+      /* ---------- drag‑drop ---------- */
+
+      function handleDrop(e) {
+        const data = JSON.parse(e.dataTransfer.getData("text/plain"));
+        if (data.src !== "rack") return;
+
+        const x = +this.dataset.x,
+          y = +this.dataset.y;
+        if (board[y][x]) return; // already occupied
+
+        let letter = myRack[data.idx];
+        let points = POINT[letter];
+
+        if (letter === "*") {
+          let chosen = prompt(
+            "Wild tile – choose a letter (not S)"
+          ).toUpperCase();
+          if (!/^[A-Z]$/.test(chosen) || chosen === "S")
+            return alert("Invalid choice");
+          letter = chosen;
+          points = 0; // wild always 0
+        }
+
+        board[y][x] = { letter, owner: uid, points };
+        myTurnPlacements.push({ x, y, letter });
+        myRack.splice(data.idx, 1);
+
+        paintRack();
+        paintBoard();
+        submit.disabled = false;
+      } /* ---------- submit click ---------- */
+
+      submit.addEventListener("click", async () => {
+        const words = findWords();
+        if (!words.length) {
+          alert("No word formed");
+          return;
+        }
+        for (const w of words) {
+          if (!(await validateWord(w.word))) {
+            alert(`"${w.word}" is not valid`);
+            myTurnPlacements.forEach(({ x, y }) => {
+              board[y][x] = null;
+            });
+            myRack.push(...myTurnPlacements.map((t) => t.letter));
+            myTurnPlacements = [];
+            paintRack();
+            paintBoard();
+            submit.disabled = true;
+            return;
+          }
+        }
+        scoreTurn(words);
+        myTurnPlacements = [];
+        drawTiles(7 - myRack.length);
+        submit.disabled = true;
+        broadcastState();
+      }); /* ---------- websocket ---------- */
+
+      ws.on("open", () => {
+        // CHANGE 3: Initialize the current player's score.
+        scores[uid] = 0;
+        paintBoard();
+        drawTiles(7);
+        updateRemainingTiles();
+      });
+      // CHANGE 4: Update state handler to accept the entire scores object.
+      // The received state is now the single source of truth.
+      ws.on("state", ({ uid: sender, board: b, scores: s }) => {
+        if (sender === uid) return;
+        for (let y = 0; y < SIZE; y++) board[y] = [...b[y]];
+        Object.assign(scores, s);
+        paintBoard();
+        updateScores();
+        updateRemainingTiles();
+      
+      });
+      function broadcastState() {
+        ws.send({ type: "state", uid, board, scores });
+        updateScores();
+        updateRemainingTiles();
+      }
+      // CHANGE 5: Update the score display logic.
+      // This now finds the opponent's uid in the scores object to display their score.
+      function updateScores() {
+        const opponentUid = Object.keys(scores).find((id) => id !== uid);
+
+        meScore.textContent = `You ${scores[uid] || 0}`;
+        thScore.textContent = `Opponent ${
+          opponentUid ? scores[opponentUid] || 0 : 0
+        }`;
+      }
+    </script>
+  </body>
+</html>
