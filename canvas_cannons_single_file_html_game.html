@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Canvas Cannons</title>
+  <style>
+    html, body { height: 100%; margin: 0; background:#111; color:#eee; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .wrap { display:flex; flex-direction:column; align-items:center; gap:.5rem; padding: 1rem; }
+    canvas { background: #74c0fc; border-radius: 16px; box-shadow: 0 8px 24px rgba(0,0,0,.35); touch-action:none; }
+    .hud { display:flex; gap:1rem; align-items:center; opacity:.9; font-weight:600; }
+    .pill { background:#222; border-radius:999px; padding:.35rem .75rem; }
+    .btn { cursor:pointer; user-select:none; }
+    .gameover { color:#ffec99; font-weight:700; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hud">
+    <div class="pill">Click & hold on a cannon to charge • Release to fire</div>
+    <div class="pill">R: reset</div>
+  </div>
+  <canvas id="game" width="900" height="520" aria-label="Canvas Cannons"></canvas>
+  <div id="status" class="hud"></div>
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  // World
+  const GRASS_Y = 420; // top of ground before carving
+  const G = 700; // px/s^2
+  const DT_LIMIT = 1/30; // clamp long frames
+
+  // Terrain heightmap (1px resolution)
+  const ground = new Float32Array(W);
+  for (let x = 0; x < W; x++) ground[x] = GRASS_Y;
+
+  // Cannons
+  const cannonSize = { w: 40, h: 25 };
+  const leftCannon = { x: 80,  y: GRASS_Y - cannonSize.h, side: 'L', angle: -Math.PI/4 };
+  const rightCannon= { x: W-120, y: GRASS_Y - cannonSize.h, side: 'R', angle: -3*Math.PI/4 };
+  const cannons = [leftCannon, rightCannon];
+
+  // State
+  let projectile = null; // {x,y,vx,vy,alive}
+  let charging = null;   // reference to cannon when holding
+  let chargeDir = 1;     // ping-pong direction
+  let charge = 0;        // 0..1
+  let running = true;    // false when game over
+  const status = document.getElementById('status');
+
+  function reset() {
+    for (let x = 0; x < W; x++) ground[x] = GRASS_Y;
+    projectile = null;
+    charging = null;
+    charge = 0; chargeDir = 1;
+    running = true;
+    status.innerHTML = '';
+  }
+
+  function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
+  function groundAt(x){
+    x = Math.floor(clamp(x,0,W-1));
+    return ground[x];
+  }
+
+  function carveCrater(cx, cy, r){
+    const r2 = r*r;
+    const minX = Math.max(0, Math.floor(cx - r));
+    const maxX = Math.min(W-1, Math.ceil(cx + r));
+    for (let x=minX; x<=maxX; x++){
+      const dx = x - cx;
+      const dy = Math.sqrt(Math.max(0, r2 - dx*dx));
+      const target = cy + dy; // lower terrain to circle bottom
+      if (target > ground[x]) ground[x] = Math.min(target, H-1);
+    }
+  }
+
+  function cannonRect(c){
+    return { x: c.x, y: c.y, w: cannonSize.w, h: cannonSize.h };
+  }
+
+  function pointInRect(px,py,r){
+    return px>=r.x && px<=r.x+r.w && py>=r.y && py<=r.y+r.h;
+  }
+
+  function drawTerrain(){
+    // Sky already painted as canvas bg color; draw ground fill from heightmap to bottom
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let x=0; x<W; x++) ctx.lineTo(x, ground[x]);
+    ctx.lineTo(W, H); ctx.closePath();
+    ctx.fillStyle = '#40c057'; // grass
+    ctx.fill();
+
+    // Dirt under grass
+    ctx.save();
+    ctx.clip();
+    ctx.fillStyle = '#826b47';
+    ctx.fillRect(0, GRASS_Y+6, W, H);
+    ctx.restore();
+  }
+
+  function drawCannon(c){
+    // body
+    ctx.fillStyle = '#343a40';
+    ctx.fillRect(c.x, c.y, cannonSize.w, cannonSize.h);
+
+    // barrel
+    const mouthOffset = 28;
+    const bx = c.x + (c.side==='L' ? cannonSize.w-6 : 6);
+    const by = c.y + 8;
+    ctx.save();
+    ctx.translate(bx, by);
+    ctx.rotate(c.angle);
+    ctx.fillStyle = '#adb5bd';
+    ctx.fillRect(0, -5, mouthOffset, 10);
+    ctx.restore();
+
+    // indicator
+    drawPowerIndicator(c);
+  }
+
+  function drawPowerIndicator(c){
+    const radius = 40;
+    const thickness = 8;
+    const segs = 18;
+    const start = c.side==='L' ? Math.PI*0.15 : Math.PI*0.85; // small arc near barrel
+    const sweep = Math.PI*0.7;
+    const cx = c.side==='L' ? c.x + cannonSize.w + 18 : c.x - 18;
+    const cy = c.y - 6;
+
+    // base arc
+    ctx.save();
+    ctx.lineWidth = thickness;
+    ctx.lineCap = 'butt';
+
+    for(let i=0;i<segs;i++){
+      const t0 = i/segs;
+      const t1 = (i+1)/segs;
+      const a0 = start + t0*sweep*(c.side==='L'?1:-1);
+      const a1 = start + t1*sweep*(c.side==='L'?1:-1);
+      const filled = (charging===c) ? (t1 <= charge) : false;
+
+      // color from red(0) -> yellow(.5) -> green(1)
+      const k = t1; // position along arc
+      const col = lerpColor(
+        k<0.5 ? [255,0,0] : [255,255,0],
+        k<0.5 ? [255,255,0] : [0,200,0],
+        k<0.5 ? k/0.5 : (k-0.5)/0.5
+      );
+      ctx.strokeStyle = `rgba(${col[0]},${col[1]},${col[2]},${filled?1:0.25})`;
+
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, a0, a1, c.side==='R');
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function lerp(a,b,t){ return a + (b-a)*t; }
+  function lerpColor(c0, c1, t){
+    return [
+      Math.round(lerp(c0[0], c1[0], t)),
+      Math.round(lerp(c0[1], c1[1], t)),
+      Math.round(lerp(c0[2], c1[2], t)),
+    ];
+  }
+
+  function drawProjectile(){
+    if (!projectile || !projectile.alive) return;
+    const p = projectile;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 5, 0, Math.PI*2);
+    ctx.fillStyle = '#212529';
+    ctx.fill();
+  }
+
+  function fire(c){
+    if (!running) return;
+    const speed = lerp(200, 700, charge); // px/s
+    const muzzleX = c.x + (c.side==='L' ? cannonSize.w-6 : 6);
+    const muzzleY = c.y + 8;
+    const angle = c.angle;
+    projectile = {
+      x: muzzleX + Math.cos(angle)*30,
+      y: muzzleY + Math.sin(angle)*30,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      alive: true,
+      owner: c.side,
+    };
+  }
+
+  function update(dt){
+    // Charging ping-pong
+    if (charging){
+      const rate = 1.25; // cycles per second (up & down)
+      charge += chargeDir * dt * rate;
+      if (charge >= 1){ charge = 1; chargeDir = -1; }
+      if (charge <= 0){ charge = 0; chargeDir = 1; }
+    }
+
+    // Projectile physics
+    if (projectile && projectile.alive){
+      let t = Math.min(dt, DT_LIMIT);
+      while (t > 1e-6) {
+        const step = Math.min(1/240, t);
+        projectile.vy += G * step;
+        projectile.x += projectile.vx * step;
+        projectile.y += projectile.vy * step;
+        t -= step;
+
+        // Terrain collision
+        if (projectile.x < 0 || projectile.x >= W || projectile.y > H){
+          // out of bounds -> treat as miss with offscreen explosion near edge
+          explode(projectile.x, Math.min(projectile.y, H-1));
+          projectile.alive = false; break;
+        }
+        if (projectile.y >= groundAt(projectile.x)){
+          explode(projectile.x, groundAt(projectile.x));
+          projectile.alive = false; break;
+        }
+        // Cannon collision (hit ends game)
+        for (const c of cannons){
+          const r = cannonRect(c);
+          if (projectile.x>=r.x && projectile.x<=r.x+r.w && projectile.y>=r.y && projectile.y<=r.y+r.h){
+            projectile.alive = false;
+            running = false;
+            status.innerHTML = `<span class="gameover">\u2728 HIT! ${projectile.owner==='L'?'Left':'Right'} cannon wins. Press R to restart.</span>`;
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  function explode(x, y){
+    carveCrater(x, y, 28);
+    // simple explosion bloom
+    ctx.save();
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, 34);
+    grad.addColorStop(0, 'rgba(255,230,150,0.8)');
+    grad.addColorStop(0.4, 'rgba(255,120,0,0.6)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y, 34, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Input
+  function cannonAt(x,y){
+    for (const c of cannons){ if (pointInRect(x,y,cannonRect(c))) return c; }
+    return null;
+  }
+
+  canvas.addEventListener('mousedown', (e) => {
+    if (!running) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (canvas.width/rect.width);
+    const y = (e.clientY - rect.top) * (canvas.height/rect.height);
+    const c = cannonAt(x,y);
+    if (c){ charging = c; chargeDir = 1; charge = 0; }
+  });
+  window.addEventListener('mouseup', () => {
+    if (charging){ fire(charging); charging = null; }
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key.toLowerCase()==='r') reset();
+  });
+
+  // Main loop
+  let last = performance.now();
+  function loop(now){
+    const dt = Math.min(0.05, (now-last)/1000); // clamp
+    last = now;
+
+    update(dt);
+
+    // Render
+    ctx.clearRect(0,0,W,H);
+    drawTerrain();
+    cannons.forEach(drawCannon);
+    drawProjectile();
+
+    if (charging && running){
+      // subtle hint text
+      ctx.fillStyle = 'rgba(255,255,255,.75)';
+      ctx.font = '12px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Power', charging.side==='L' ? charging.x + 70 : charging.x - 70, charging.y - 40);
+    }
+
+    requestAnimationFrame(loop);
+  }
+  reset();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
